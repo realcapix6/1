@@ -15,25 +15,31 @@ jobs:
     steps:
       - name: 1. Create User & Enable Screen Sharing (VNC)
         run: |
-          # Create the VNC admin user (runners have FDE off, so no password-conflict issue)
+          # Create the VNC admin user
           sudo sysadminctl -addUser "$VNC_USER" -password "$VNC_PASSWORD" -admin
           echo "$VNC_USER ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/"$VNC_USER"
 
-          # Keep the display awake and never lock (headless CI would otherwise show a black screen over VNC)
-          sudo pmset -a sleep 0 displaysleep 0 lock 0
-          sudo -u "$VNC_USER" defaults write com.apple.screensaver idleTime 0
-          sudo defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser "$VNC_USER"
+          # Keep the display awake (only valid pmset keys; 'lock' is NOT a pmset key)
+          sudo pmset -a sleep 0 displaysleep 0 || true
+          sudo -u "$VNC_USER" defaults write com.apple.screensaver idleTime 0 || true
+          sudo defaults write /Library/Preferences/com.apple.screensaver askForPassword -int 0 || true
 
-          # Enable Apple Remote Desktop / Screen Sharing with a VNC password
+          # Auto-login the VNC user so the GUI console has a rendered desktop (applies on next boot)
+          sudo defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser "$VNC_USER" || true
+
+          # Enable Apple Remote Desktop / Screen Sharing with a VNC password (known-good form)
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -activate -configure -access -on -users "$VNC_USER" -privs -all \
-            -clientopts -setvncpw -vncpw "$VNC_PASSWORD" -restart -agent
+            -activate -configure -access -on \
+            -clientopts -setvncpw -vncpw "$VNC_PASSWORD" \
+            -restart -agent
 
           sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
 
-          # Best-effort: switch the GUI console to the VNC user's session
-          CAP_UID=$(id -u "$VNC_USER")
-          /System/Library/CoreServices/Menu\ Extras/User.menu/Contents/Resources/CGSession -switchToUserID "$CAP_UID" >/dev/null 2>&1 &
+          # Best-effort: switch the console to the VNC user's session now
+          CAP_UID=$(id -u "$VNC_USER" 2>/dev/null || echo "")
+          if [ -n "$CAP_UID" ]; then
+            /System/Library/CoreServices/Menu\ Extras/User.menu/Contents/Resources/CGSession -switchToUserID "$CAP_UID" >/dev/null 2>&1 &
+          fi
 
           echo "Screen Sharing enabled on :5900 for user $VNC_USER"
 
