@@ -1,4 +1,4 @@
-name: macOS Cloud SSH
+name: macOS Cloud Desktop
 
 on:
   workflow_dispatch:
@@ -9,63 +9,77 @@ jobs:
     timeout-minutes: 360
 
     env:
-      SSH_USER: "CAPi"
-      SSH_PASSWORD: "amirkiyani2008"
+      VNC_USER: "CAPi"
+      VNC_PASSWORD: "amirkiyani2008"
 
     steps:
-      - name: 1. Create User & Enable SSH
+      - name: 1. Create User, Enable SSH + Screen Sharing (VNC)
         run: |
           # Create the admin user
-          sudo sysadminctl -addUser "$SSH_USER" -password "$SSH_PASSWORD" -admin
-          echo "$SSH_USER ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/"$SSH_USER"
+          sudo sysadminctl -addUser "$VNC_USER" -password "$VNC_PASSWORD" -admin
+          echo "$VNC_USER ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/"$VNC_USER"
 
-          # Enable Remote Login (SSH) and make sure sshd allows password auth
+          # SSH (bonus shell access)
           sudo systemsetup -setremotelogin on
           sudo sed -i '' 's/^#*PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config 2>/dev/null || true
-          sudo launchctl unload /System/Library/LaunchDaemons/ssh.plist 2>/dev/null || true
           sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist 2>/dev/null || true
-          echo "SSH enabled for user $SSH_USER on port 22"
 
-      - name: 2. Expose SSH via public tunnel + Keep Alive
+          # Keep display awake + auto-login so VNC shows a real desktop
+          sudo pmset -a sleep 0 displaysleep 0 || true
+          sudo -u "$VNC_USER" defaults write com.apple.screensaver idleTime 0 || true
+          sudo defaults write /Library/Preferences/com.apple.screensaver askForPassword -int 0 || true
+          sudo defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser "$VNC_USER" || true
+
+          # Enable Screen Sharing / VNC with a VNC password
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate -configure -access -on \
+            -clientopts -setvncpw -vncpw "$VNC_PASSWORD" \
+            -restart -agent
+          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
+
+          # Best-effort: switch the console to the VNC user's session
+          CAP_UID=$(id -u "$VNC_USER" 2>/dev/null || echo "")
+          if [ -n "$CAP_UID" ]; then
+            /System/Library/CoreServices/Menu\ Extras/User.menu/Contents/Resources/CGSession -switchToUserID "$CAP_UID" >/dev/null 2>&1 &
+          fi
+
+          echo "SSH + Screen Sharing (VNC :5900) enabled for $VNC_USER"
+
+      - name: 2. Expose SSH(22) + VNC(5900) via public tunnels + Keep Alive
         run: |
           set +e
-          # Download cloudflared (no Homebrew / no account needed) for the current arch
+          # Install cloudflared (no account needed) for the current arch
           ARCH=$(uname -m)
           if [ "$ARCH" = "arm64" ]; then CF_ARCH="arm64"; else CF_ARCH="amd64"; fi
           curl -fsSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-${CF_ARCH}.tgz" -o /tmp/cf.tgz
           tar xzf /tmp/cf.tgz -C /tmp
           sudo install -m 0755 /tmp/cloudflared /usr/local/bin/cloudflared 2>/dev/null || install -m 0755 /tmp/cloudflared /usr/local/bin/cloudflared
 
-          # Quick TCP tunnel: cloudflare edge -> this Mac's localhost:22
-          cloudflared tunnel --url ssh://localhost:22 --no-autoupdate > /tmp/cf.log 2>&1 &
+          # Public TCP tunnels: cloudflare edge -> this Mac's localhost:22 and :5900
+          cloudflared tunnel --url ssh://localhost:22 --no-autoupdate > /tmp/cf_ssh.log 2>&1 &
+          cloudflared tunnel --url tcp://localhost:5900 --no-autoupdate > /tmp/cf_vnc.log 2>&1 &
           sleep 18
 
-          ADDR=$(grep -oE 'tcp://[a-z0-9.-]+:[0-9]+' /tmp/cf.log | head -1)
-          if [ -z "$ADDR" ]; then
-            echo "cloudflared did not return a tcp URL; log:"; cat /tmp/cf.log
-          fi
-
-          # Pull host and port out of the tcp:// URL
-          HOST=$(echo "$ADDR" | sed -E 's#tcp://##; s/:[0-9]+$//')
-          PORT=$(echo "$ADDR" | sed -E 's#tcp://[a-z0-9.-]+:##')
+          SSH_ADDR=$(grep -oE 'tcp://[a-z0-9.-]+:[0-9]+' /tmp/cf_ssh.log | head -1)
+          VNC_ADDR=$(grep -oE 'tcp://[a-z0-9.-]+:[0-9]+' /tmp/cf_vnc.log | head -1)
 
           echo ""
           echo "=================================================="
-          echo "  >>> macOS SSH SERVER IS READY! <<<"
-          if [ -n "$HOST" ]; then
-            echo "  Connect from Windows PowerShell:"
-            echo "     ssh $SSH_USER@$HOST -p $PORT"
-            echo "  password: $SSH_PASSWORD"
+          echo "  >>> macOS DESKTOP SERVER IS READY! <<<"
+          if [ -n "$SSH_ADDR" ]; then
+            SH=$(echo "$SSH_ADDR" | sed -E 's#tcp://##; s/:[0-9]+$//')
+            SP=$(echo "$SSH_ADDR" | sed -E 's#tcp://[a-z0-9.-]+:##')
+            echo "  SSH : ssh $VNC_USER@$SH -p $SP"
           fi
-          echo "  (macOS version: $(sw_vers -productVersion))"
+          if [ -n "$VNC_ADDR" ]; then
+            echo "  VNC : $VNC_ADDR"
+            echo "       (open TightVNC / RealVNC Viewer -> $VNC_ADDR)"
+            echo "       user: $VNC_USER   password: $VNC_PASSWORD"
+          fi
+          echo "  macOS version: $(sw_vers -productVersion)"
           echo "=================================================="
 
-          # Keep the job (and the tunnel) alive for up to 6 hours
           for i in $(seq 1 360); do
             sleep 60
-            if [ $((i % 30)) -eq 0 ] && [ -n "$HOST" ]; then
-              echo "[$i/360] still alive -> ssh $SSH_USER@$HOST -p $PORT"
-            else
-              echo "[$i/360] macOS SSH server running..."
-            fi
+            echo "[$i/360] macOS desktop server running..."
           done
