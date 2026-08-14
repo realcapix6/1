@@ -5,7 +5,7 @@ on:
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: macos-latest   # currently macOS 26 Tahoe; pin to macos-26 to lock it
     timeout-minutes: 360
 
     env:
@@ -35,8 +35,16 @@ jobs:
         env:
           TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
         run: |
-          curl -fsSL https://pkgs.tailscale.com/stable/tailscale-setup-latest.pkg -o /tmp/tailscale.pkg
+          # Resolve latest stable Tailscale macOS package (the old URL 404'd)
+          VER=$(curl -s "https://pkgs.tailscale.com/stable/?mode=json" | grep -o '"MacZipsVersion": *"[^"]*"' | grep -o '[0-9][0-9.]*')
+          echo "Tailscale version: $VER"
+          curl -fsSL "https://pkgs.tailscale.com/stable/Tailscale-${VER}-macos.pkg" -o /tmp/tailscale.pkg
           sudo installer -pkg /tmp/tailscale.pkg -target /
+
+          # Stop any auto-started daemon so our userspace instance owns the socket
+          sudo launchctl unload /Library/LaunchDaemons/io.tailscale.tailscaled.plist 2>/dev/null || true
+          sudo pkill -f "Tailscale/tailscaled" 2>/dev/null || true
+          sleep 2
 
           TS=/Applications/Tailscale.app/Contents/MacOS/Tailscale
           TSD=/Applications/Tailscale.app/Contents/MacOS/tailscaled
