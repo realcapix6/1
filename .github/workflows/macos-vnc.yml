@@ -1,0 +1,97 @@
+name: macOS Cloud VNC
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 360
+
+    env:
+      VNC_USER: "CAPi"
+      VNC_PASSWORD: "amirkiyani2008"
+
+    steps:
+      - name: 1. Create User & Enable Screen Sharing (VNC)
+        run: |
+          sudo sysadminctl -addUser "$VNC_USER" -password "$VNC_PASSWORD" -admin
+          echo "$VNC_USER ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/"$VNC_USER"
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate -configure -access -on -users "$VNC_USER" -privs -all \
+            -clientopts -setvncpw -vncpw "$VNC_PASSWORD" -restart -agent
+          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null
+          echo "Screen Sharing enabled on :5900 for user $VNC_USER"
+
+      - name: 2. Install Tailscale + Keep Alive
+        env:
+          TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+        run: |
+          set +e
+          if [ -z "$TAILSCALE_AUTHKEY" ]; then
+            echo "ERROR: TAILSCALE_AUTHKEY secret is empty"
+            exit 1
+          fi
+
+          brew install tailscale >/tmp/brew.log 2>&1
+          TS="$(brew --prefix)/bin/tailscale"
+          TSD="$(brew --prefix)/bin/tailscaled"
+          if [ ! -x "$TSD" ]; then
+            echo "brew tailscaled not found, installing .pkg"
+            VER=$(curl -s "https://pkgs.tailscale.com/stable/?mode=json" | grep -o '"MacZipsVersion": *"[^"]*"' | grep -o '[0-9][0-9.]*')
+            echo "Tailscale version: $VER"
+            curl -fsSL "https://pkgs.tailscale.com/stable/Tailscale-${VER}-macos.pkg" -o /tmp/tailscale.pkg
+            sudo installer -pkg /tmp/tailscale.pkg -target /
+            TS=/Applications/Tailscale.app/Contents/MacOS/Tailscale
+            TSD=/Applications/Tailscale.app/Contents/MacOS/tailscaled
+          fi
+          echo "Using TS=$TS  TSD=$TSD"
+
+          sudo launchctl unload /Library/LaunchDaemons/io.tailscale.tailscaled.plist 2>/dev/null
+          sudo pkill -f tailscaled 2>/dev/null
+          sleep 2
+
+          sudo "$TSD" --tun=userspace-networking --state=/tmp/tailscale.state >/tmp/tailscaled.log 2>&1 &
+          sleep 10
+          echo "--- tailscaled.log ---"
+          cat /tmp/tailscaled.log
+
+          echo "--- tailscale up (60s timeout) ---"
+          sudo "$TS" up --authkey="$TAILSCALE_AUTHKEY" --hostname="github-macos-vnc" --ssh >/tmp/up.log 2>&1 &
+          UP_PID=$!
+          for i in $(seq 1 60); do
+            if ! kill -0 $UP_PID 2>/dev/null; then break; fi
+            sleep 1
+          done
+          if kill -0 $UP_PID 2>/dev/null; then
+            echo "tailscale up timed out after 60s"
+            kill -9 $UP_PID 2>/dev/null
+            echo "--- up.log ---"; cat /tmp/up.log
+            echo "--- tailscaled.log ---"; cat /tmp/tailscaled.log
+            exit 1
+          fi
+          wait $UP_PID
+          UP_RC=$?
+          if [ $UP_RC -ne 0 ]; then
+            echo "tailscale up FAILED (rc=$UP_RC)"
+            echo "--- up.log ---"; cat /tmp/up.log
+            echo "--- tailscaled.log ---"; cat /tmp/tailscaled.log
+            exit 1
+          fi
+          sleep 5
+          TS_IP=$("$TS" ip -4)
+
+          echo ""
+          echo "=================================================="
+          echo "  >>> macOS VNC SERVER IS READY! <<<"
+          echo "  Tailscale host: github-macos-vnc"
+          echo "  Tailscale IP  : $TS_IP"
+          echo "  VNC user      : $VNC_USER"
+          echo "  VNC password  : $VNC_PASSWORD"
+          echo "  VNC port      : 5900"
+          echo "=================================================="
+
+          for i in $(seq 1 360); do
+            sleep 60
+            echo "[$i/360] macOS VNC server running..."
+          done
