@@ -1,0 +1,71 @@
+name: macOS Cloud SSH
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 360
+
+    env:
+      SSH_USER: "CAPi"
+      SSH_PASSWORD: "amirkiyani2008"
+
+    steps:
+      - name: 1. Create User & Enable SSH
+        run: |
+          # Create the admin user
+          sudo sysadminctl -addUser "$SSH_USER" -password "$SSH_PASSWORD" -admin
+          echo "$SSH_USER ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/"$SSH_USER"
+
+          # Enable Remote Login (SSH) and make sure sshd allows password auth
+          sudo systemsetup -setremotelogin on
+          sudo sed -i '' 's/^#*PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config 2>/dev/null || true
+          sudo launchctl unload /System/Library/LaunchDaemons/ssh.plist 2>/dev/null || true
+          sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist 2>/dev/null || true
+          echo "SSH enabled for user $SSH_USER on port 22"
+
+      - name: 2. Expose SSH via public tunnel + Keep Alive
+        run: |
+          set +e
+          # Download cloudflared (no Homebrew / no account needed) for the current arch
+          ARCH=$(uname -m)
+          if [ "$ARCH" = "arm64" ]; then CF_ARCH="arm64"; else CF_ARCH="amd64"; fi
+          curl -fsSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-${CF_ARCH}.tgz" -o /tmp/cf.tgz
+          tar xzf /tmp/cf.tgz -C /tmp
+          sudo install -m 0755 /tmp/cloudflared /usr/local/bin/cloudflared 2>/dev/null || install -m 0755 /tmp/cloudflared /usr/local/bin/cloudflared
+
+          # Quick TCP tunnel: cloudflare edge -> this Mac's localhost:22
+          cloudflared tunnel --url ssh://localhost:22 --no-autoupdate > /tmp/cf.log 2>&1 &
+          sleep 18
+
+          ADDR=$(grep -oE 'tcp://[a-z0-9.-]+:[0-9]+' /tmp/cf.log | head -1)
+          if [ -z "$ADDR" ]; then
+            echo "cloudflared did not return a tcp URL; log:"; cat /tmp/cf.log
+          fi
+
+          # Pull host and port out of the tcp:// URL
+          HOST=$(echo "$ADDR" | sed -E 's#tcp://##; s/:[0-9]+$//')
+          PORT=$(echo "$ADDR" | sed -E 's#tcp://[a-z0-9.-]+:##')
+
+          echo ""
+          echo "=================================================="
+          echo "  >>> macOS SSH SERVER IS READY! <<<"
+          if [ -n "$HOST" ]; then
+            echo "  Connect from Windows PowerShell:"
+            echo "     ssh $SSH_USER@$HOST -p $PORT"
+            echo "  password: $SSH_PASSWORD"
+          fi
+          echo "  (macOS version: $(sw_vers -productVersion))"
+          echo "=================================================="
+
+          # Keep the job (and the tunnel) alive for up to 6 hours
+          for i in $(seq 1 360); do
+            sleep 60
+            if [ $((i % 30)) -eq 0 ] && [ -n "$HOST" ]; then
+              echo "[$i/360] still alive -> ssh $SSH_USER@$HOST -p $PORT"
+            else
+              echo "[$i/360] macOS SSH server running..."
+            fi
+          done
