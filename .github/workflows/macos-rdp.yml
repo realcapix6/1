@@ -5,7 +5,7 @@ on:
 
 jobs:
   build:
-    runs-on: macos-latest   # currently macOS 26 Tahoe; pin to macos-26 to lock it
+    runs-on: macos-latest
     timeout-minutes: 360
 
     env:
@@ -15,45 +15,44 @@ jobs:
     steps:
       - name: 1. Create User & Enable Screen Sharing (VNC)
         run: |
-          # Create the 'CAPi' admin user
           sudo sysadminctl -addUser "$VNC_USER" -password "$VNC_PASSWORD" -admin
           echo "$VNC_USER ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/"$VNC_USER"
-
-          # Enable Apple Remote Desktop / Screen Sharing with a VNC password
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -activate \
-            -configure -access -on \
-            -users "$VNC_USER" \
-            -privs -all \
-            -clientopts -setvncpw -vncpw "$VNC_PASSWORD" \
-            -restart -agent
-
-          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
+            -activate -configure -access -on -users "$VNC_USER" -privs -all \
+            -clientopts -setvncpw -vncpw "$VNC_PASSWORD" -restart -agent
+          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null  true
           echo "Screen Sharing enabled on :5900 for user $VNC_USER"
 
       - name: 2. Install Tailscale + Keep Alive
         env:
           TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
         run: |
-          # Resolve latest stable Tailscale macOS package (the old URL 404'd)
-          VER=$(curl -s "https://pkgs.tailscale.com/stable/?mode=json" | grep -o '"MacZipsVersion": *"[^"]*"' | grep -o '[0-9][0-9.]*')
-          echo "Tailscale version: $VER"
-          curl -fsSL "https://pkgs.tailscale.com/stable/Tailscale-${VER}-macos.pkg" -o /tmp/tailscale.pkg
-          sudo installer -pkg /tmp/tailscale.pkg -target /
+          if [ -z "$TAILSCALE_AUTHKEY" ]; then echo "ERROR: TAILSCALE_AUTHKEY secret is empty"; exit 1; fi
 
-          # Stop any auto-started daemon so our userspace instance owns the socket
-          sudo launchctl unload /Library/LaunchDaemons/io.tailscale.tailscaled.plist 2>/dev/null || true
-          sudo pkill -f "Tailscale/tailscaled" 2>/dev/null || true
+          # Homebrew gives headless-friendly tailscale/tailscaled binaries
+          brew install tailscale  true
+          TS="$(brew --prefix)/bin/tailscale"
+          TSD="$(brew --prefix)/bin/tailscaled"
+          if [ ! -x "$TSD" ]; then
+            TS=/Applications/Tailscale.app/Contents/MacOS/Tailscale
+            TSD=/Applications/Tailscale.app/Contents/MacOS/tailscaled
+          fi
+          echo "Using TS=$TS  TSD=$TSD"
+
+          # Ensure no other tailscaled owns the socket
+          sudo launchctl unload /Library/LaunchDaemons/io.tailscale.tailscaled.plist 2>/dev/null  true
+          sudo pkill -f tailscaled 2>/dev/null  true
           sleep 2
 
-          TS=/Applications/Tailscale.app/Contents/MacOS/Tailscale
-          TSD=/Applications/Tailscale.app/Contents/MacOS/tailscaled
-
           sudo "$TSD" --tun=userspace-networking --state=/tmp/tailscale.state >/tmp/tailscaled.log 2>&1 &
-          sleep 6
-
-          sudo "$TS" up --authkey="$TAILSCALE_AUTHKEY" --hostname="github-macos-vnc" --ssh
           sleep 8
+          echo "--- tailscaled.log ---"; cat /tmp/tailscaled.log || true
+
+          echo "--- tailscale up (60s timeout) ---"
+          if ! timeout 60 sudo "$TS" up --authkey="$TAILSCALE_AUTHKEY" --hostname="github-macos-vnc" --ssh; then
+            echo "tailscale up FAILED or timed out"; echo "--- tailscaled.log ---"; cat /tmp/tailscaled.log; exit 1
+          fi
+          sleep 5
           TS_IP=$("$TS" ip -4)
 
           echo ""
