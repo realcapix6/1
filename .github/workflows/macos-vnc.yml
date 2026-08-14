@@ -17,10 +17,24 @@ jobs:
         run: |
           sudo sysadminctl -addUser "$VNC_USER" -password "$VNC_PASSWORD" -admin
           echo "$VNC_USER ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/"$VNC_USER"
+
+          # Keep the display awake and never lock (otherwise VNC shows a black screen)
+          sudo pmset -a sleep 0 displaysleep 0 lock 0
+          sudo -u "$VNC_USER" defaults write com.apple.screensaver idleTime 0
+          # Auto-login the VNC user so the GUI console has a live desktop (takes effect on next boot)
+          sudo defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser "$VNC_USER"
+
+          # Enable Apple Remote Desktop / Screen Sharing with a VNC password
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate -configure -access -on -users "$VNC_USER" -privs -all \
             -clientopts -setvncpw -vncpw "$VNC_PASSWORD" -restart -agent
-          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null
+
+          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
+
+          # Best-effort: switch the GUI console to the VNC user's session now
+          CAP_UID=$(id -u "$VNC_USER")
+          /System/Library/CoreServices/Menu\ Extras/User.menu/Contents/Resources/CGSession -switchToUserID "$CAP_UID" >/dev/null 2>&1 &
+
           echo "Screen Sharing enabled on :5900 for user $VNC_USER"
 
       - name: 2. Install Tailscale + Keep Alive
