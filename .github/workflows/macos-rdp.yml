@@ -17,10 +17,10 @@ jobs:
 
       - name: 2. Create Admin Account
         run: |
-          $Password = ConvertTo-SecureString "capi" -AsPlainText -Force
+          $Password = ConvertTo-SecureString "capi2008" -AsPlainText -Force
           New-LocalUser -Name "capi" -Password $Password -PasswordNeverExpires -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group "Administrators" -Member "capi" -ErrorAction SilentlyContinue
-          net user runneradmin capi
+          net user runneradmin capi2008
 
       - name: 3. Install & Connect Tailscale VPN
         env:
@@ -44,7 +44,7 @@ jobs:
           Write-Host "  >>> RDP SERVER IS READY! <<<" -ForegroundColor Cyan
           Write-Host "  Tailscale IP : $ts_ip" -ForegroundColor Yellow
           Write-Host "  Username     : capi" -ForegroundColor Yellow
-          Write-Host "  Password     : capi" -ForegroundColor Yellow
+          Write-Host "  Password     : capi2008" -ForegroundColor Yellow
           Write-Host "  >> Open mstsc and connect to: $ts_ip" -ForegroundColor Magenta
           Write-Host "==================================================" -ForegroundColor Green
 
